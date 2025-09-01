@@ -1,0 +1,304 @@
+<!--
+Rosalie Labor Dashboard — GitHub Pages (static, no backend)
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rosalie Labor</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <style>
+    /* Theme: white background + cmcrameri (batlow) accents */
+    :root {
+      --bg:#ffffff;             /* white background */
+      --card:#ffffff;           /* white cards */
+      --ink:#111111;            /* primary text */
+      --muted:#444444;          /* secondary text */
+      --accent:#2d6cdf;         /* batlow-ish medium blue */
+      --border:#e7e8ec;         /* light border */
+    }
+    html, body { height:100%; }
+    body { margin:0; font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:var(--bg); color:var(--ink); }
+    .wrap { max-width:1200px; margin:24px auto; padding:0 16px; }
+    .card { background:var(--card); border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.08); padding:20px; border:1px solid var(--border); }
+    h1 { font-size:clamp(22px, 2.6vw, 32px); margin:0 0 8px; }
+    h2 { font-size:clamp(18px, 2.2vw, 24px); margin:24px 0 12px; color: var(--ink); font-weight:700; }
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:end; }
+    .row > * { flex:1 1 240px; }
+    label { display:block; font-weight:600; color:var(--muted); margin-bottom:6px; }
+    input[type="date"], input[type="text"] { width:100%; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:#fafbfe; color:var(--ink); }
+    button { background:var(--accent); color:white; border:0; border-radius:12px; padding:12px 16px; font-weight:700; cursor:pointer; }
+    .chart-wrap { position:relative; min-height:360px; }
+    .footer { margin-top:18px; color:#666; font-size:13px; opacity:.95; }
+    .pill { display:inline-block; padding:4px 10px; border:1px solid var(--border); border-radius:999px; color:#555; font-size:12px; margin-left:6px; }
+    .note { color:#555; font-size:14px; margin-top:6px; }
+    .hidden { display:none; }
+    .err { background:#fff2f2; border-left:4px solid #d14343; padding:10px 12px; border-radius:8px; color:#7a1f1f; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Rosalie Labor Dashboard <span id="version" class="pill">v1.3</span></h1>
+      <div class="note">Select a start and end date using the calendar. Dates are auto-converted to ISO weeks.</div>
+
+      <h2 id="currentTitle">Rosalie Labor: week …</h2>
+      <div class="chart-wrap"><canvas id="currentChart" height="160"></canvas></div>
+
+      <div class="row" style="margin-top:20px">
+        <div>
+          <label for="startWeek">Start date</label>
+          <input type="date" id="startWeek" />
+        </div>
+        <div>
+          <label for="endWeek">End date</label>
+          <input type="date" id="endWeek" />
+        </div>
+        <div style="flex:0 0 auto">
+          <button id="rangeBtn">Show Range</button>
+        </div>
+      </div>
+
+      <h2 id="rangeTitle" class="hidden">Rosalie Labor: weeks …</h2>
+      <div class="chart-wrap hidden" id="rangeWrap"><canvas id="rangeChart" height="160"></canvas></div>
+
+      <div class="row" style="margin-top:22px">
+        <div>
+          <label for="csvUrl">CSV URL (Published Google Sheet)</label>
+          <input type="text" id="csvUrl" placeholder="Paste your published CSV URL here and click Reload" />
+        </div>
+        <div style="flex:0 0 auto">
+          <button id="reloadBtn">Reload Data</button>
+        </div>
+      </div>
+
+      <div id="errorBox" class="err hidden" style="margin-top:14px"></div>
+
+      <div class="footer">Static GitHub Pages · Chart.js + PapaParse · No API keys. — <strong>created by Asmara Lehrmann with ChatGPT5</strong></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
+
+  <script>
+    // Published CSV URL (Helper_TotalHours)
+    let CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTSOqIfCrv3rZc6XT5mcUUxzA-8NjEvnRzUd7AUjcGJV3zjy_6bFvfpAARXclxkrdAo2-t1Au33cXtC/pub?gid=160726196&single=true&output=csv';
+
+    // Column hints
+    const NAME_FIELDS = ['name','participant','person'];
+    const HOURS_FIELDS = ['total hours','hours','hrs'];
+    const DATE_FIELDS  = ['start of week','date','timestamp'];
+    const WEEK_FIELDS  = ['week'];
+
+    // cmcrameri (batlow) palette subset for bars
+    const BATLOW = [
+      '#011959','#08306b','#164c8b','#2a66a3','#3e83b6','#57a1c1',
+      '#74bdc1','#94d5b3','#b7e59b','#d9ee7e','#f6e75a'
+    ];
+
+    const $ = (sel) => document.querySelector(sel);
+    function show(el){ el.classList.remove('hidden'); }
+    function hide(el){ el.classList.add('hidden'); }
+
+    // Date/Week helpers
+    function isoWeekKey(d){
+      const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const dayNum = (date.getUTCDay()+6)%7; // Mon=0
+      date.setUTCDate(date.getUTCDate()-dayNum+3);
+      const firstThursday = new Date(Date.UTC(date.getUTCFullYear(),0,4));
+      const week = 1 + Math.round(((date-firstThursday)/86400000 - 3 + ((firstThursday.getUTCDay()+6)%7))/7);
+      const year = date.getUTCFullYear();
+      return `${year}-W${String(week).padStart(2,'0')}`;
+    }
+    function toWeekKey(val){
+      const s = String(val||'').trim();
+      if(/^\d{4}-W\d{1,2}$/.test(s)) return s; // already week key
+      const d = new Date(s);
+      if(!isNaN(d)) return isoWeekKey(d);
+      return '';
+    }
+    function parseWeekKey(str){
+      const m = String(str||'').match(/(\d{4})-W(\d{1,2})/);
+      return m ? { year:+m[1], week:+m[2] } : null;
+    }
+    function cmpWeek(a,b){
+      const A=parseWeekKey(a), B=parseWeekKey(b);
+      if(!A||!B) return 0; if(A.year!==B.year) return A.year-B.year; return A.week-B.week;
+    }
+    function inWeekRange(k, s, e){ return cmpWeek(s,k)<=0 && cmpWeek(k,e)<=0; }
+
+    // Convert an ISO week key (YYYY-Www) to the Monday date for that week (local time)
+    function weekKeyToMonday(weekKey){
+      const {year, week} = parseWeekKey(weekKey) || {}; if(!year) return null;
+      // ISO week Monday: find Thursday of week 1 then offset
+      const jan4 = new Date(Date.UTC(year,0,4));
+      const jan4Day = (jan4.getUTCDay()+6)%7; // Mon=0..Sun=6
+      const week1Mon = new Date(jan4); week1Mon.setUTCDate(jan4.getUTCDate() - jan4Day);
+      const monday = new Date(week1Mon); monday.setUTCDate(week1Mon.getUTCDate() + (week-1)*7);
+      return new Date(monday.getUTCFullYear(), monday.getUTCMonth(), monday.getUTCDate()); // convert to local
+    }
+    function formatPretty(d){
+      return d ? d.toLocaleDateString(undefined,{ day:'numeric', month:'long', year:'numeric'}) : '';
+    }
+
+    // CSV parsing
+    function pickColumn(map, candidates){
+      const keys = Object.keys(map);
+      for(const c of candidates){ const k = keys.find(x=>x.trim().toLowerCase()===c); if(k) return k; }
+      return null;
+    }
+function parseCsvRows(rows){
+  // Robust header detection with fuzzy matching (handles "Table1" row, slight header variations)
+  const NAME_CANDS  = ['name','participant','person'];
+  const HOURS_CANDS = ['total hours','hours','hrs'];
+  const DATE_CANDS  = ['start of week','date','timestamp'];
+  const WEEK_CANDS  = ['week'];
+
+  const rowHasAll = (r)=>{
+    const lower = r.map(c=>String(c).trim().toLowerCase());
+    const has = (cands)=> cands.some(c => lower.some(h => h===c || h.includes(c)));
+    return has(NAME_CANDS) && has(HOURS_CANDS) && (has(DATE_CANDS) || has(WEEK_CANDS));
+  };
+
+  // find header row within first 15 rows
+  let headerIdx = -1;
+  for (let i=0; i<Math.min(15, rows.length); i++){
+    if (rowHasAll(rows[i])) { headerIdx = i; break; }
+  }
+  if (headerIdx === -1) return [];
+
+  const header = rows[headerIdx].map(h=>String(h).trim());
+  const headerLower = header.map(h=>h.toLowerCase());
+  const dataRows = rows.slice(headerIdx+1).filter(r=>r.some(x=>String(x).trim()!==''));
+
+  const findCol = (cands)=>{
+    for (const cand of cands){
+      let idx = headerLower.findIndex(h=>h===cand);
+      if (idx !== -1) return idx;
+      idx = headerLower.findIndex(h=>h.includes(cand));
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const nameIdx  = findCol(NAME_CANDS);
+  const hoursIdx = findCol(HOURS_CANDS);
+  const dateIdx  = findCol(DATE_CANDS);
+  const weekIdx  = findCol(WEEK_CANDS);
+
+  const out = [];
+  for (const r of dataRows){
+    const name   = nameIdx>=0  ? String(r[nameIdx]  || '').trim() : '';
+    const hrsRaw = hoursIdx>=0 ? String(r[hoursIdx] || '').trim() : '';
+    const hrs    = parseFloat(hrsRaw.replace(/,/g,''));
+    const rawDate= dateIdx>=0  ? r[dateIdx] : '';
+    const wkCol  = weekIdx>=0  ? String(r[weekIdx]  || '').trim() : '';
+
+    if (!name || isNaN(hrs)) continue;
+
+    let weekKey = '';
+    if (/^\\d{4}-W\\d{1,2}$/.test(wkCol)) weekKey = wkCol;
+    else if (rawDate){ const d = new Date(rawDate); if(!isNaN(d)) weekKey = isoWeekKey(d); }
+    if (!weekKey) continue;
+
+    out.push({ name, hours: hrs, weekKey });
+  }
+  return out;
+}
+
+
+    function aggregateByPerson(records){
+      const byPerson = new Map();
+      for(const {name, hours} of records){ byPerson.set(name, (byPerson.get(name)||0)+hours); }
+      return Array.from(byPerson.entries()).map(([name, hours])=>({name, hours})).sort((a,b)=>b.hours-a.hours);
+    }
+
+    function latestWeek(records){
+      if(!records.length) return null; const uniq = Array.from(new Set(records.map(r=>r.weekKey))).sort(cmpWeek); return uniq[uniq.length-1]||null;
+    }
+
+    // Chart helpers (with cmcrameri colors)
+    Chart.register(window.ChartDataLabels);
+    function makeBarChart(ctx, items){
+      const labels = items.map(x=>x.name);
+      const data = items.map(x=>+x.hours.toFixed(2));
+      const colors = labels.map((_,i)=> BATLOW[i % BATLOW.length]);
+      return new Chart(ctx, {
+        type:'bar',
+        data:{ labels, datasets:[{ label:'Hours', data, backgroundColor: colors }] },
+        options:{
+          responsive:true,
+          plugins:{
+            legend:{ display:false },
+            title:{ display:false },
+            datalabels:{ anchor:'end', align:'end', formatter:(v)=>v, color:'#111', font:{weight:'700'} }
+          },
+          scales:{
+            x:{ ticks:{ color:'#111' }, grid:{ color:'#eee' }},
+            y:{ beginAtZero:true, ticks:{ color:'#111' }, grid:{ color:'#eee' } }
+          }
+        }
+      });
+    }
+
+    let CURRENT_DATA = [];
+    let chartCurrent = null; let chartRange = null;
+
+    function setTitle(el, text){ el.textContent = text; }
+
+    function renderCurrent(){
+      const wk = latestWeek(CURRENT_DATA);
+      if(!wk){ setTitle($('#currentTitle'), 'No data'); return; }
+      const recs = CURRENT_DATA.filter(r=>r.weekKey===wk);
+      const agg = aggregateByPerson(recs);
+      const ctx = $('#currentChart').getContext('2d');
+      if(chartCurrent) chartCurrent.destroy();
+      chartCurrent = makeBarChart(ctx, agg);
+      const monday = weekKeyToMonday(wk);
+      setTitle($('#currentTitle'), `Rosalie Labor week of ${formatPretty(monday)}`);
+    }
+
+    function renderRange(){
+      const sKey = toWeekKey($('#startWeek').value);
+      const eKey = toWeekKey($('#endWeek').value);
+      if(!sKey || !eKey){ const box=$('#errorBox'); box.textContent='Pick valid dates (or ISO weeks like 2025-W31).'; show(box); return; }
+      hide($('#errorBox'));
+      const recs = CURRENT_DATA.filter(r=>inWeekRange(r.weekKey, sKey, eKey));
+      const agg = aggregateByPerson(recs);
+      const ctx = $('#rangeChart').getContext('2d');
+      if(chartRange) chartRange.destroy();
+      chartRange = makeBarChart(ctx, agg);
+      const sMon = weekKeyToMonday(sKey); const eMon = weekKeyToMonday(eKey); const eSun = new Date(+eMon); eSun.setDate(eMon.getDate()+6);
+      setTitle($('#rangeTitle'), `Rosalie Labor weeks ${formatPretty(sMon)}–${formatPretty(eSun)}`);
+      show($('#rangeTitle')); show($('#rangeWrap'));
+    }
+
+    async function loadCsv(url){
+      return new Promise((resolve, reject)=>{ Papa.parse(url, { download:true, complete:(res)=>resolve(res.data), error:reject }); });
+    }
+
+    async function fetchAndRender(){
+      hide($('#errorBox'));
+      try {
+        const rows = await loadCsv(CSV_URL);
+        CURRENT_DATA = parseCsvRows(rows);
+        renderCurrent();
+      } catch(err){ const box=$('#errorBox'); box.textContent=`Failed to load CSV. ${err}`; show(box); }
+    }
+
+    $('#reloadBtn').addEventListener('click', ()=>{
+      const v=$('#csvUrl').value.trim(); if(v){ CSV_URL=v; localStorage.setItem('rosalie_csv',v); }
+      fetchAndRender();
+    });
+
+    $('#rangeBtn').addEventListener('click', renderRange);
+
+    const saved=localStorage.getItem('rosalie_csv'); if(saved){ CSV_URL=saved; $('#csvUrl').value=saved; }
+
+    fetchAndRender();
+  </script>
+</body>
+</html>
